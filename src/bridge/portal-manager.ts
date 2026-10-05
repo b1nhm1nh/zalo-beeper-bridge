@@ -89,7 +89,7 @@ export class PortalManager {
     // first: already-joined counts as done.
     try {
       const joined = await this.bridge.getBot().getJoinedMembers(roomId);
-      if (joined.includes(this.ownerUserId)) {
+      if (joined && this.ownerUserId in joined) {
         this.ownerJoined.add(roomId);
         this.ownerJoinFailedAt.delete(roomId);
         return;
