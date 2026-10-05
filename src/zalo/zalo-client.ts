@@ -9,10 +9,28 @@ import { ListenerManager } from "./listener-manager.ts";
 import { RateLimiter } from "./rate-limiter.ts";
 import type { RawZaloMessage, ZaloMention, ZaloMessage, ZaloQuotePayload, ZaloReactionEvent, ZaloSeenEvent, ZaloThreadType, ZaloTypingEvent } from "./types.ts";
 
+/** A message was recalled (unsent) in Zalo — from any participant, any device. */
+export interface ZaloRecallEvent {
+  threadId: string;
+  threadType: ZaloThreadType;
+  /** msgId of the RECALLED message (zca-js Undo content.deleteMsg, falling back to data.msgId) */
+  msgId: string;
+  /** client msgId of the recalled message, when Zalo provides it */
+  cliMsgId: string;
+  /** true when the bridged account itself performed the recall (selfListen echo) */
+  isSelf: boolean;
+  /** uid that performed the recall (own id when isSelf) */
+  actorId: string;
+}
+
 export interface ZaloClientOptions {
   credsPath: string;
   messagesPerMinute: number;
   burst?: number;
+  /** Called when a Zalo message is recalled/unsent (mirrors the "recall" event). */
+  onRecall?: (event: ZaloRecallEvent) => void;
+  /** Inject a pre-built limiter (tests); defaults to a per-minute token bucket. */
+  rateLimiter?: RateLimiter;
 }
 
 interface ZaloClientEvents {
@@ -20,6 +38,7 @@ interface ZaloClientEvents {
   seen: [event: ZaloSeenEvent];
   typing: [event: ZaloTypingEvent];
   reaction: [event: ZaloReactionEvent];
+  recall: [event: ZaloRecallEvent];
   connected: [];
   reconnecting: [attempt: number, delayMs: number];
   dead: [reason: string];
@@ -39,7 +58,7 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
   constructor(opts: ZaloClientOptions) {
     super();
     this.opts = opts;
-    this.rateLimiter = new RateLimiter(opts.messagesPerMinute, opts.burst);
+    this.rateLimiter = opts.rateLimiter ?? new RateLimiter(opts.messagesPerMinute, opts.burst);
     this.listenerManager.on("connected", () => {
       this.listenerState = "connected";
       this.emit("connected");
@@ -184,6 +203,34 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
         icon: r.data.content.rIcon ?? "",
       });
     });
+    // Recall/unsent (user AND group threads): zca-js emits "undo" with an Undo
+    // payload whose content.deleteMsg names the recalled message. selfListen is
+    // on, so own recalls (any device) arrive too — surfaced via isSelf.
+    this.api.listener.on("undo", (undo) => {
+      const u = undo as unknown as {
+        threadId?: string;
+        isGroup?: boolean;
+        isSelf?: boolean;
+        data?: {
+          msgId?: string | number;
+          cliMsgId?: string | number;
+          uidFrom?: string | number;
+          content?: { deleteMsg?: string | number; cliMsgId?: string | number };
+        };
+      };
+      const msgId = String(u?.data?.content?.deleteMsg ?? u?.data?.msgId ?? "");
+      if (!u?.threadId || !msgId) return;
+      const event: ZaloRecallEvent = {
+        threadId: String(u.threadId),
+        threadType: u.isGroup ? "group" : "user",
+        msgId,
+        cliMsgId: String(u.data?.content?.cliMsgId ?? u.data?.cliMsgId ?? ""),
+        isSelf: u.isSelf === true,
+        actorId: String(u.data?.uidFrom ?? ""),
+      };
+      this.opts.onRecall?.(event);
+      this.emit("recall", event);
+    });
     this.listenerManager.start(this.api);
   }
 
@@ -275,9 +322,11 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     }
   }
 
-  /** React to a Zalo message (Beeper→Zalo). Not rate-limited — it's a control action, not a message. */
+  /** React to a Zalo message (Beeper→Zalo). Rate-limited like every outgoing Zalo call. */
   async react(threadId: string, threadType: ZaloThreadType, msgId: string, cliMsgId: string, emoji: string): Promise<void> {
-    const api = this.api;
+    if (!this.api) throw new Error("Not logged in");
+    await this.rateLimiter.acquire();
+    const api = this.api; // re-read AFTER the wait — logout mid-wait must not use a dead api
     if (!api) throw new Error("Not logged in");
     await api.addReaction(emojiToZalo(emoji), {
       data: { msgId, cliMsgId },
@@ -286,17 +335,20 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     });
   }
 
-  /** Recall (undo) a message we sent (Beeper→Zalo). Not rate-limited — a control action, and delay is user-visible. */
+  /** Recall (undo) a message we sent (Beeper→Zalo). Rate-limited like every outgoing Zalo call. */
   async recall(threadId: string, threadType: ZaloThreadType, msgId: string, cliMsgId: string): Promise<void> {
-    const api = this.api;
+    if (!this.api) throw new Error("Not logged in");
+    await this.rateLimiter.acquire();
+    const api = this.api; // re-read AFTER the wait — logout mid-wait must not use a dead api
     if (!api) throw new Error("Not logged in");
     await api.undo({ msgId, cliMsgId }, threadId, threadType === "group" ? ThreadType.Group : ThreadType.User);
   }
 
   /**
-   * Mark a message seen on Zalo (Beeper read → Zalo "seen"). Best-effort, no rate limit.
-   * senderId is the original sender (peer for DM); for a DM, uidFrom must be the peer
-   * and idTo the account itself. st/at/cmd/ts default to 0 (accepted by Zalo).
+   * Mark a message seen on Zalo (Beeper read → Zalo "seen"). Best-effort.
+   * Rate-limited like every outgoing Zalo call. senderId is the original sender
+   * (peer for DM); for a DM, uidFrom must be the peer and idTo the account
+   * itself. st/at/cmd/ts default to 0 (accepted by Zalo).
    */
   async sendSeen(
     threadId: string,
@@ -306,8 +358,13 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     senderId: string,
     msgType: string,
   ): Promise<void> {
-    const api = this.api;
-    if (!api) return;
+    if (!this.api) return;
+    await this.rateLimiter.acquire();
+    const api = this.api; // re-read AFTER the wait — logout mid-wait must not use a dead api
+    if (!api) {
+      console.warn("sendSeen skipped — logged out while waiting for the rate limiter");
+      return;
+    }
     const isGroup = threadType === "group";
     try {
       await api.sendSeenEvent(
@@ -329,10 +386,15 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     }
   }
 
-  /** Show "typing" on Zalo (Beeper owner typing → Zalo). Best-effort. */
+  /** Show "typing" on Zalo (Beeper owner typing → Zalo). Best-effort. Rate-limited like every outgoing Zalo call. */
   async sendTypingToZalo(threadId: string, threadType: ZaloThreadType): Promise<void> {
-    const api = this.api;
-    if (!api) return;
+    if (!this.api) return;
+    await this.rateLimiter.acquire();
+    const api = this.api; // re-read AFTER the wait — logout mid-wait must not use a dead api
+    if (!api) {
+      console.warn("sendTypingEvent skipped — logged out while waiting for the rate limiter");
+      return;
+    }
     try {
       await api.sendTypingEvent(threadId, threadType === "group" ? ThreadType.Group : ThreadType.User);
     } catch {
@@ -354,10 +416,13 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     width: number,
     height: number,
     caption = "",
+    onBeforeSend?: () => void,
   ): Promise<string[]> {
-    const api = this.api;
-    if (!api) throw new Error("Not logged in");
+    if (!this.api) throw new Error("Not logged in");
     await this.rateLimiter.acquire();
+    const api = this.api; // re-read AFTER the wait — logout mid-wait must not use a dead api
+    if (!api) throw new Error("Not logged in");
+    onBeforeSend?.(); // AFTER the rate-limit wait — echo-suppression TTLs start at real send time
     const res = await api.sendMessage(
       { msg: caption, attachments: [{ data, filename, metadata: { totalSize: data.byteLength, width, height } }] },
       threadId,
@@ -379,10 +444,13 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     data: Buffer,
     filename: `${string}.${string}`,
     caption = "",
+    onBeforeSend?: () => void,
   ): Promise<string[]> {
-    const api = this.api;
-    if (!api) throw new Error("Not logged in");
+    if (!this.api) throw new Error("Not logged in");
     await this.rateLimiter.acquire();
+    const api = this.api; // re-read AFTER the wait — logout mid-wait must not use a dead api
+    if (!api) throw new Error("Not logged in");
+    onBeforeSend?.(); // AFTER the rate-limit wait — echo-suppression TTLs start at real send time
     const res = await api.sendMessage(
       { msg: caption, attachments: [{ data, filename, metadata: { totalSize: data.byteLength } }] },
       threadId,
@@ -407,10 +475,11 @@ export class ZaloClient extends EventEmitter<ZaloClientEvents> {
     onBeforeSend?: () => void,
     mentions?: ZaloMention[],
   ): Promise<{ msgId: string | null }> {
-    // Capture before the rate-limit wait — logout during the wait must not null-deref
+    if (!this.api) throw new Error("Not logged in");
+    await this.rateLimiter.acquire();
+    // Re-read AFTER the wait — a logout while queued must not send against a dead api
     const api = this.api;
     if (!api) throw new Error("Not logged in");
-    await this.rateLimiter.acquire();
     onBeforeSend?.();
     const zaloType = threadType === "group" ? ThreadType.Group : ThreadType.User;
     // A quote and/or mentions require the object form of MessageContent

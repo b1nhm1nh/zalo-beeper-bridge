@@ -60,4 +60,20 @@ describe("MappingStore", () => {
     expect(store.upsertPuppet("u1", "@sh-zalo_u1:x", "New Name")).toBe(true); // renamed
     expect(store.upsertPuppet("u2", "@sh-zalo_u2:x", null)).toBe(false); // new without name
   });
+
+  describe.skipIf(process.platform === "win32")("file permissions", () => {
+    it("restricts the db and leftover -wal/-shm files to owner-only", () => {
+      const mode = (p: string) => fs.statSync(p).mode & 0o777;
+      store.close(); // sidecars must be touched only while no connection is open
+      fs.writeFileSync(`${dbPath}-wal`, ""); // simulate sidecars left by a previous run
+      fs.writeFileSync(`${dbPath}-shm`, "");
+      fs.chmodSync(dbPath, 0o644); // simulate a db created under a permissive umask
+      fs.chmodSync(`${dbPath}-wal`, 0o644);
+      fs.chmodSync(`${dbPath}-shm`, 0o644);
+      store = new MappingStore(dbPath);
+      expect(mode(dbPath)).toBe(0o600);
+      expect(mode(`${dbPath}-wal`)).toBe(0o600);
+      expect(mode(`${dbPath}-shm`)).toBe(0o600);
+    });
+  });
 });

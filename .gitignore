@@ -2,15 +2,18 @@ node_modules/
 dist/
 
 # secrets & sessions — never commit
+.env
 *.session.json
 *.key
 .*.tmp
 zalo-creds*
+zalo-creds*.json
 spike/creds*
 spike/qr.png
 spike/raw-events.ndjson
 config.yaml
 registration.yaml
+bridge.db*
 *.db
 *.db-wal
 *.db-shm

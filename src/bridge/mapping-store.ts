@@ -1,5 +1,6 @@
 // SQLite persistence: portal rooms, ghost puppets, message dedup/echo keys.
 // better-sqlite3 sync API — single-user bridge volume makes async pooling YAGNI.
+import fs from "node:fs";
 import Database from "better-sqlite3";
 import type { ZaloThreadType } from "../zalo/types.ts";
 
@@ -19,8 +20,23 @@ export class MappingStore {
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
+    this.restrictPerms(dbPath);
     this.db.pragma("journal_mode = WAL");
+    // WAL/SHM siblings from a previous run may already exist at open time
+    this.restrictPerms(`${dbPath}-wal`);
+    this.restrictPerms(`${dbPath}-shm`);
     this.migrate();
+  }
+
+  /** Conversation metadata (who talks to whom, rooms) is sensitive — SQLite
+   * creates the file with the process umask (typically 0644), so tighten all
+   * database sidecar files to owner-only after open/create. */
+  private restrictPerms(p: string): void {
+    try {
+      if (fs.existsSync(p)) fs.chmodSync(p, 0o600);
+    } catch (err) {
+      console.warn(`[mapping-store] could not restrict permissions on ${p}: ${err}`);
+    }
   }
 
   private migrate(): void {

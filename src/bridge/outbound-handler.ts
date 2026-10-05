@@ -51,6 +51,8 @@ export interface OutboundHandlerDeps {
   /** event_ids the bridge must never send outbound: its own double-puppet posts
    * (shared with InboundHandler) + events already handled here (retry idempotency). */
   bridgedEventIds: Set<string>;
+  /** Ghost MXID prefix derived from the registration (see deriveGhostPrefix). */
+  ghostPrefix: string;
 }
 
 export class OutboundHandler {
@@ -143,7 +145,7 @@ export class OutboundHandler {
     const userIds = (isEdit ? content["m.new_content"]?.["m.mentions"] : content["m.mentions"])?.user_ids ?? [];
     const uidFromMxid = (mxid: string): string | null => {
       if (mxid === this.deps.ownerUserId) return this.deps.zalo.ownId;
-      const m = /^@sh-zalo_(.+):/.exec(mxid);
+      const m = new RegExp(`^@${this.deps.ghostPrefix}(.+):`).exec(mxid);
       return m ? m[1]! : null;
     };
     let mentions = mentionsFromUserIds(body, userIds, (mxid) => {
@@ -195,6 +197,12 @@ export class OutboundHandler {
   private async handleMedia(event: WeakEvent, portal: PortalRow, msgtype: string, mxcUrl: string, content: { body?: string; filename?: string; info?: { mimetype?: string } }): Promise<void> {
     if (event.sender !== this.deps.ownerUserId) return;
     if (event.event_id && this.deps.store.hasEventId(event.event_id)) return;
+    // MSC2530 caption: when body differs from the filename, body is the caption.
+    // Attach it to the media message so Zalo shows one captioned message, not two.
+    const caption = content.body && content.body !== content.filename ? content.body : "";
+    // Whether the echo markers actually got armed (only happens at real send time,
+    // after the rate-limit wait) — a failed send must disarm exactly what was armed.
+    let markersArmed = false;
     try {
       // Authenticated-media download via fetch (bot-sdk's downloadContent 400s on Beeper's R2 redirect)
       const { buffer: data, mimetype: dlType } = await downloadMatrixMedia(
@@ -204,14 +212,17 @@ export class OutboundHandler {
         this.deps.mediaMaxBytes,
       );
       const mimetype = content.info?.mimetype ?? dlType;
-      // MSC2530 caption: when body differs from the filename, body is the caption.
-      // Attach it to the media message so Zalo shows one captioned message, not two.
-      const caption = content.body && content.body !== content.filename ? content.body : "";
       const filename = buildFilename(msgtype, content.filename, mimetype);
-      // Arm the pre-send guard before the network call: the selfListen echo can
-      // arrive before the send resolves and we record its msgId
-      this.deps.echo.expectImage(portal.thread_id);
-      if (caption) this.deps.echo.expect(portal.thread_id, caption); // caption echoes as a text selfListen event
+      // Echo markers arm at REAL send time — the zalo client invokes onBeforeSend
+      // after its rate-limit wait, immediately before sendImage/sendFile. Arming
+      // before the wait (the queue can hold a send for many seconds) would let the
+      // 15s suppression TTL expire before the selfListen echo arrives, and the
+      // account's own send would come back as a duplicate.
+      const armEchoMarkers = (): void => {
+        markersArmed = true;
+        this.deps.echo.expectImage(portal.thread_id);
+        if (caption) this.deps.echo.expect(portal.thread_id, caption); // caption echoes as a text selfListen event
+      };
       let msgIds: string[];
       if (msgtype === "m.image") {
         let width = 0;
@@ -223,15 +234,21 @@ export class OutboundHandler {
         } catch {
           // dimensions optional
         }
-        msgIds = await this.deps.zalo.sendImage(portal.thread_id, portal.thread_type, data, filename, width, height, caption);
+        msgIds = await this.deps.zalo.sendImage(portal.thread_id, portal.thread_type, data, filename, width, height, caption, armEchoMarkers);
       } else {
         // video (.mp4) / file / audio — zca-js routes by extension
-        msgIds = await this.deps.zalo.sendFile(portal.thread_id, portal.thread_type, data, filename, caption);
+        msgIds = await this.deps.zalo.sendFile(portal.thread_id, portal.thread_type, data, filename, caption, armEchoMarkers);
       }
       // Record msgIds for echo dedup; first carries the Matrix event_id so redacting recalls it on Zalo
       msgIds.forEach((msgId, i) => this.deps.store.recordMessage(msgId, portal.room_id, i === 0 ? (event.event_id ?? null) : null, "outbound"));
       if (msgIds.length === 0 && event.event_id) this.deps.store.markOutboundHandled(event.event_id, portal.room_id);
     } catch (err) {
+      // If the send failed after the markers armed, disarm them so a real
+      // phone-typed message isn't swallowed by the suppressor
+      if (markersArmed) {
+        this.deps.echo.cancelImage(portal.thread_id);
+        if (caption) this.deps.echo.cancel(portal.thread_id, caption);
+      }
       await this.notice(event.room_id!, `⚠ Failed to send ${msgtype.replace("m.", "")} to Zalo: ${(err as Error).message}`);
     }
   }

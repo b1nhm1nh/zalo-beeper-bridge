@@ -3,7 +3,19 @@
 <!--
   Beeper<->Zalo bridge appservice.
   Install: copy to ~/Library/LaunchAgents/ and `launchctl load` it (see docs/deployment-guide.md).
-  Paths are absolute because launchd runs with a minimal environment.
+
+  EDIT THE PLACEHOLDERS FIRST — replace every REPLACE_WITH_* below with real absolute
+  paths. launchd runs with a minimal environment: it does NOT expand `~`, so relative
+  paths and home-dir shorthand silently fail. Paths are absolute for that reason.
+
+    REPLACE_WITH_NODE_BIN  absolute path to the node binary that runs TypeScript
+                           natively (Node >= 22.12), e.g.
+                           /Users/you/.nvm/versions/node/v24.16.0/bin/node
+    REPLACE_WITH_REPO_DIR  absolute path of this repo checkout, e.g. /Users/you/beeper-zalo
+
+  The bridge creates the logs/ directory itself on boot, but launchd opens the log
+  files BEFORE the process starts, so the directory must already exist:
+    mkdir -p REPLACE_WITH_REPO_DIR/logs
 -->
 <plist version="1.0">
 <dict>
@@ -11,15 +23,15 @@
     <string>dev.beeper-zalo.bridge</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/cris/.nvm/versions/node/v24.16.0/bin/node</string>
+        <string>REPLACE_WITH_NODE_BIN</string>
         <string>src/index.ts</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo</string>
+    <string>REPLACE_WITH_REPO_DIR</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/cris/.nvm/versions/node/v24.16.0/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin</string>
+        <string>REPLACE_WITH_NODE_BIN_DIR:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -28,8 +40,8 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo/logs/bridge.log</string>
+    <string>REPLACE_WITH_REPO_DIR/logs/bridge.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo/logs/bridge.log</string>
+    <string>REPLACE_WITH_REPO_DIR/logs/bridge.log</string>
 </dict>
 </plist>

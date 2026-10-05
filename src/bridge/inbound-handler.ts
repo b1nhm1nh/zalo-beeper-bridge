@@ -66,9 +66,11 @@ export class InboundHandler {
     }
     if (this.deps.store.hasMessage(msg.msgId)) return; // duplicate listener event
 
-    // Our own send echoed back by selfListen → already visible in Beeper, don't repost
-    const isTextEcho = msg.isSelf && msg.content.kind === "text" && this.deps.echo.consume(msg.threadId, msg.content.text);
-    const isMediaEcho = msg.isSelf && msg.content.kind === "photo" && this.deps.echo.consumeImage(msg.threadId);
+    // Our own send echoed back by selfListen → already visible in Beeper, don't repost.
+    // The echo's own msgId makes the match exact: a phone-typed message with the same
+    // short text carries a DIFFERENT msgId and must not be swallowed as an echo.
+    const isTextEcho = msg.isSelf && msg.content.kind === "text" && this.deps.echo.consume(msg.threadId, msg.content.text, msg.msgId);
+    const isMediaEcho = msg.isSelf && msg.content.kind === "photo" && this.deps.echo.consumeImage(msg.threadId, msg.msgId);
     if (isTextEcho || isMediaEcho) {
       // The echo carries the cliMsgId our send response lacked (needed for recall)
       // and a full quotable payload (needed to reply to our own Beeper-sent message)
@@ -164,7 +166,7 @@ export class InboundHandler {
       msg.msgId,
       portal.room_id,
       eventId,
-      "inbound",
+      msg.isSelf ? "outbound" : "inbound",
       msg.quotable ? JSON.stringify(msg.quotable) : null,
       msg.cliMsgId ?? null,
       msg.senderId,

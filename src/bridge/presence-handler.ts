@@ -7,6 +7,8 @@ import type { ZaloClient } from "../zalo/zalo-client.ts";
 import type { ZaloReactionEvent, ZaloSeenEvent, ZaloTypingEvent } from "../zalo/types.ts";
 
 const TYPING_STOP_MS = 8_000;
+/** Last annotation per (room, sender, target) — bound so a long-lived bridge can't grow unbounded. */
+const REACTION_CACHE_LIMIT = 500;
 
 export class PresenceHandler {
   private readonly store: MappingStore;
@@ -15,6 +17,9 @@ export class PresenceHandler {
   private readonly getOwnZaloId: () => string | null;
   /** auto-stop timers keyed by roomId|uid so repeated typing events extend, not stack */
   private readonly typingTimers = new Map<string, NodeJS.Timeout>();
+  /** (roomId, sender mxid, target eventId) → last posted m.reaction, so a changed or
+   * repeated Zalo reaction replaces the annotation instead of stacking. Oldest-evicted. */
+  private readonly lastReactions = new Map<string, { annotationEventId: string; emoji: string }>();
 
   private readonly zalo: ZaloClient;
   private readonly ownerUserId: string;
@@ -31,23 +36,22 @@ export class PresenceHandler {
   async handleOwnerReceipt(roomId: string, content: Record<string, unknown>): Promise<void> {
     const portal = this.store.getPortalByRoom(roomId);
     if (!portal) return;
-    // Find the most recent read event id belonging to the owner
-    let readEventId: string | null = null;
+    const ownId = this.getOwnZaloId();
+    // Scan ALL read entries — an unmapped earlier read must not stop a later one
+    // from being sent. The last entry that yields a valid target wins.
+    let best: { zaloMsgId: string; cliMsgId: string; senderId: string; msgType: string | null } | null = null;
     for (const [eventId, receipts] of Object.entries(content)) {
       const readBy = (receipts as { "m.read"?: Record<string, unknown> })["m.read"];
-      if (readBy && this.ownerUserId in readBy) readEventId = eventId;
+      if (!(readBy && this.ownerUserId in readBy)) continue;
+      const target = this.store.getSeenTargetByEventId(eventId);
+      if (!target?.cliMsgId || !target.senderId) continue; // not a bridged inbound message
+      // The owner's own phone-mirrored messages have senderId == own uid; a seen
+      // for them is bogus (uidFrom == uidTo) — skip.
+      if (ownId && target.senderId === ownId) continue;
+      best = { zaloMsgId: target.zaloMsgId, cliMsgId: target.cliMsgId, senderId: target.senderId, msgType: target.msgType };
     }
-    if (!readEventId) return;
-    const target = this.store.getSeenTargetByEventId(readEventId);
-    if (!target?.cliMsgId || !target.senderId) return;
-    await this.zalo.sendSeen(
-      portal.thread_id,
-      portal.thread_type,
-      target.zaloMsgId,
-      target.cliMsgId,
-      target.senderId,
-      target.msgType ?? "webchat",
-    );
+    if (!best) return;
+    await this.zalo.sendSeen(portal.thread_id, portal.thread_type, best.zaloMsgId, best.cliMsgId, best.senderId, best.msgType ?? "webchat");
   }
 
   /** Owner typing in a portal → show typing on Zalo (m.typing EDU). */
@@ -79,7 +83,9 @@ export class PresenceHandler {
     }
   }
 
-  /** Inbound reaction (Zalo→Beeper): ghost annotates the bridged Matrix event. */
+  /** Inbound reaction (Zalo→Beeper): ghost annotates the bridged Matrix event.
+   * A changed or repeated reaction REPLACES the previous annotation (redact +
+   * repost) so annotations don't stack in the room. */
   async handleReaction(event: ZaloReactionEvent): Promise<void> {
     // Our own reaction (made from Beeper) echoes back via selfListen — it's already
     // shown as the owner's reaction, so re-posting it as a ghost of ourselves would
@@ -90,11 +96,29 @@ export class PresenceHandler {
     if (!event.icon) return; // reaction removal — Matrix has no clean un-react via appservice; skip
     // ensurePuppet so the reacting ghost has a name + avatar (they may not have messaged yet)
     const intent = await this.puppets.ensurePuppet(event.senderId, event.senderName);
-    await intent
-      .sendEvent(target.roomId, "m.reaction", {
-        "m.relates_to": { rel_type: "m.annotation", event_id: target.eventId, key: zaloToEmoji(event.icon) },
-      })
-      .catch((err: Error) => console.warn("inbound reaction failed:", err.message));
+    const emoji = zaloToEmoji(event.icon);
+    const dedupeKey = `${target.roomId}|${this.puppets.mxidFor(event.senderId)}|${target.eventId}`;
+    const previous = this.lastReactions.get(dedupeKey);
+    if (previous && previous.emoji === emoji) return; // unchanged — nothing to update
+    if (previous) {
+      // appservice-bridge's Intent has no redactEvent of its own; its bot-sdk client does
+      await intent.matrixClient
+        .redactEvent(target.roomId, previous.annotationEventId)
+        .catch((err: Error) => console.warn("redacting previous reaction failed:", err.message));
+    }
+    try {
+      const sent = await intent.sendEvent(target.roomId, "m.reaction", {
+        "m.relates_to": { rel_type: "m.annotation", event_id: target.eventId, key: emoji },
+      });
+      this.lastReactions.delete(dedupeKey); // re-insert to refresh eviction order
+      this.lastReactions.set(dedupeKey, { annotationEventId: sent.event_id, emoji });
+      if (this.lastReactions.size > REACTION_CACHE_LIMIT) {
+        const oldest = this.lastReactions.keys().next().value;
+        if (oldest !== undefined) this.lastReactions.delete(oldest);
+      }
+    } catch (err) {
+      console.warn("inbound reaction failed:", err instanceof Error ? err.message : err);
+    }
   }
 
   async handleTyping(event: ZaloTypingEvent): Promise<void> {

@@ -9,7 +9,7 @@ Both **must** run together. They are single-user and single-listener: never run 
 
 ## Install
 
-Plist templates live in `deploy/launchd/`. They use absolute paths (launchd has a minimal env). If you move the repo or change Node version, update the paths inside them.
+Plist templates live in `deploy/launchd/`. They use `REPLACE_WITH_*` placeholders for absolute paths (launchd has a minimal env and does not expand `~`). If you move the repo or change Node version, fill them in.
 
 ```bash
 cp deploy/launchd/dev.beeper-zalo.bridge.plist ~/Library/LaunchAgents/

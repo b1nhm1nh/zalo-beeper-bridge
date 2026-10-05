@@ -15,10 +15,12 @@ A self-hosted [Matrix](https://matrix.org/) application service that bridges a p
 | Replies / quotes | ✅ | ✅ |
 | Message recall | — | ✅ |
 | Read receipts | ✅ | ✅ |
-| Typing indicators | ✅ | ✅ |
+| Typing indicators | — (disabled) | — (disabled) |
 | Own messages sent from the phone | ✅ (double-puppeted) | n/a |
 
-Plus: ghost users with real names + avatars, portal rooms auto-created on first message, a `sync` command to backfill pinned conversations and groups, Zalo network branding (name + logo), listener auto-reconnect with ban-suspicion pause, conservative outbound rate limiting, and encrypted credential storage at rest.
+Plus: ghost users with real names + avatars, portal rooms auto-created on first message, a `sync` command to backfill pinned conversations and groups, Zalo network branding (name + logo), Beeper remote-account state publishing (CONNECTED / TRANSIENT_DISCONNECT / DISCONNECTED / LOGGED_OUT, kept fresh by a heartbeat so the network chip never silently expires), listener auto-reconnect with exponential backoff, conservative outbound rate limiting, and encrypted credential storage at rest.
+
+Typing indicators are disabled in both directions (inbound mirroring was switched off in `0e7aaef`); the plumbing is in place — uncomment the `typing` handlers in `src/index.ts` to re-enable. Edits made in Beeper are re-sent to Zalo as a fresh message (Zalo has no edit API), not an in-place edit.
 
 **Not implemented:** voice/video/file outbound, Zalo→Beeper recall & edit sync, historical backfill with original timestamps, E2EE bridging.
 
@@ -65,10 +67,12 @@ matrix:
   domain: beeper.local
   registrationPath: registration.yaml
   port: 29350
+  # Your own Beeper Matrix ID. Only this user may issue bot commands (login/logout/
+  # status/sync) and only their rooms are treated as management chats.
   owner: "@<your-beeper-username>:beeper.com"
 zalo:
   credsPath: zalo-creds.session.json     # encrypted at rest; never commit
-  messagesPerMinute: 8                    # conservative pacing to protect the account
+  messagesPerMinute: 60                   # token-bucket pacing; burst 30 goes through instantly
 bridge:
   dbPath: bridge.db
   mediaMaxBytes: 10485760
@@ -84,6 +88,8 @@ Run the bridge and the bbctl proxy side by side (two terminals, or a process man
 npm run dev                               # the appservice on localhost:29350
 bbctl proxy -r registration.yaml          # proxies Beeper <-> the bridge over a websocket
 ```
+
+The bridge writes its own diagnostics to stdout; for 24/7 operation under launchd, copy `deploy/launchd/*.plist` to `~/Library/LaunchAgents/` and replace the `REPLACE_WITH_*` placeholders with your absolute Node/repo paths (launchd does not expand `~`). Both plists log into `logs/` inside the repo — the bridge creates that directory on boot, but create it once yourself (`mkdir -p logs`) before the first launchd start, since launchd opens the log files before the process runs. See `docs/deployment-guide.md` and `docs/troubleshooting-runbook.md`.
 
 ### 4. Log in to Zalo
 

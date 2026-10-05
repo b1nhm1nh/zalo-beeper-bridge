@@ -17,6 +17,9 @@ export interface PortalContext {
   resolveGroupName?: (threadId: string) => Promise<string | null>;
 }
 
+/** Retry window for a failed owner auto-join — backoff, not never. */
+export const OWNER_JOIN_RETRY_MS = 60_000;
+
 export class PortalManager {
   private readonly bridge: Bridge;
   private readonly store: MappingStore;
@@ -24,8 +27,10 @@ export class PortalManager {
   private readonly ownerUserId: string;
   private readonly branding: NetworkBranding;
   private readonly inFlight = new Map<string, Promise<PortalRow>>();
-  /** roomIds where the owner's auto-join was ensured this run */
+  /** roomIds where the owner's auto-join succeeded this run */
   private readonly ownerJoined = new Set<string>();
+  /** roomId → when the last owner auto-join attempt failed (retry with backoff) */
+  private readonly ownerJoinFailedAt = new Map<string, number>();
   /** "roomId|ghostMxid" pairs whose join + room profile were ensured this run */
   private readonly ghostJoined = new Set<string>();
 
@@ -71,15 +76,22 @@ export class PortalManager {
    * double-puppet the owner). Without this, chats stay invisible until the user
    * manually accepts, and sending fails with "no permission" while un-joined.
    * Falls back silently to manual accept when double-puppeting is unavailable.
+   * A failed join is retried on the NEXT portal use after the backoff window —
+   * caching the failure for the process lifetime used to silently drop the
+   * owner's own phone messages in that room forever.
    */
   private async ensureOwnerJoined(roomId: string): Promise<void> {
     if (this.ownerJoined.has(roomId)) return;
+    const failedAt = this.ownerJoinFailedAt.get(roomId);
+    if (failedAt !== undefined && Date.now() - failedAt < OWNER_JOIN_RETRY_MS) return; // still backing off
     try {
       await this.bridge.getIntent(this.ownerUserId).join(roomId);
+      this.ownerJoined.add(roomId);
+      this.ownerJoinFailedAt.delete(roomId);
     } catch (err) {
-      console.warn(`[bridge] owner auto-join ${roomId} failed (manual accept needed):`, (err as Error).message);
+      this.ownerJoinFailedAt.set(roomId, Date.now());
+      console.warn(`[bridge] owner auto-join ${roomId} failed (manual accept needed; retry in ${OWNER_JOIN_RETRY_MS / 1000}s):`, (err as Error).message);
     }
-    this.ownerJoined.add(roomId); // one attempt per room per run either way
   }
 
   private async createPortal(ctx: PortalContext): Promise<PortalRow> {

@@ -3,6 +3,17 @@
 <!--
   bbctl proxy: bridges the Beeper websocket to the local appservice on port 29350.
   Install: copy to ~/Library/LaunchAgents/ and `launchctl load` it.
+
+  EDIT THE PLACEHOLDERS FIRST — replace every REPLACE_WITH_* below with real absolute
+  paths. launchd runs with a minimal environment: it does NOT expand `~`, so relative
+  paths and home-dir shorthand silently fail.
+
+    REPLACE_WITH_BBCTL_BIN  absolute path to bbctl, e.g. /Users/you/.local/bin/bbctl
+    REPLACE_WITH_REPO_DIR   absolute path of this repo checkout (holds registration.yaml)
+
+  The bridge creates the logs/ directory itself on boot, but launchd opens the log
+  files BEFORE the process starts, so the directory must already exist:
+    mkdir -p REPLACE_WITH_REPO_DIR/logs
 -->
 <plist version="1.0">
 <dict>
@@ -10,13 +21,18 @@
     <string>dev.beeper-zalo.proxy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/cris/.local/bin/bbctl</string>
+        <string>REPLACE_WITH_BBCTL_BIN</string>
         <string>proxy</string>
         <string>-r</string>
         <string>registration.yaml</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo</string>
+    <string>REPLACE_WITH_REPO_DIR</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>REPLACE_WITH_BBCTL_BIN_DIR:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -24,8 +40,8 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo/logs/proxy.log</string>
+    <string>REPLACE_WITH_REPO_DIR/logs/proxy.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/cris/BrainOS/10_Work/02_Personal/beeper-zalo/logs/proxy.log</string>
+    <string>REPLACE_WITH_REPO_DIR/logs/proxy.log</string>
 </dict>
 </plist>
