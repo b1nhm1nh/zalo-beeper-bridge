@@ -102,8 +102,17 @@ export class PortalManager {
       this.ownerJoined.add(roomId);
       this.ownerJoinFailedAt.delete(roomId);
     } catch (err) {
+      // Puppet-joining the owner can never succeed on beeper.com (M_EXCLUSIVE:
+      // the owner's user id is not in the appservice namespace). The owner joins
+      // invites manually in the app, so treat that error as done.
+      const message = (err as Error).message ?? "";
+      if (/M_EXCLUSIVE|not reserved/i.test(message)) {
+        this.ownerJoined.add(roomId);
+        this.ownerJoinFailedAt.delete(roomId);
+        return;
+      }
       this.ownerJoinFailedAt.set(roomId, Date.now());
-      console.warn(`[bridge] owner auto-join ${roomId} failed (manual accept needed; retry in ${OWNER_JOIN_RETRY_MS / 1000}s):`, (err as Error).message);
+      console.warn(`[bridge] owner auto-join ${roomId} failed (manual accept needed; retry in ${OWNER_JOIN_RETRY_MS / 1000}s):`, message);
     }
   }
 
