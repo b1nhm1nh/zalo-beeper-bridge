@@ -84,6 +84,19 @@ export class PortalManager {
     if (this.ownerJoined.has(roomId)) return;
     const failedAt = this.ownerJoinFailedAt.get(roomId);
     if (failedAt !== undefined && Date.now() - failedAt < OWNER_JOIN_RETRY_MS) return; // still backing off
+    // On beeper.com the appservice cannot puppet the owner (M_EXCLUSIVE), and a
+    // membership that already exists makes the attempt pure noise. Ask the room
+    // first: already-joined counts as done.
+    try {
+      const joined = await this.bridge.getBot().getJoinedMembers(roomId);
+      if (joined.includes(this.ownerUserId)) {
+        this.ownerJoined.add(roomId);
+        this.ownerJoinFailedAt.delete(roomId);
+        return;
+      }
+    } catch {
+      // Membership probe failed; fall through to the join attempt.
+    }
     try {
       await this.bridge.getIntent(this.ownerUserId).join(roomId);
       this.ownerJoined.add(roomId);
