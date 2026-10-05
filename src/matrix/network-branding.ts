@@ -23,7 +23,10 @@ let cachedLogoMxc: string | null = null;
 async function getLogoMxc(intent: Intent, logoPath: string): Promise<string | null> {
   if (cachedLogoMxc) return cachedLogoMxc;
   if (!fs.existsSync(logoPath)) return null;
-  cachedLogoMxc = await intent.uploadContent(fs.readFileSync(logoPath), { type: "image/png", name: "network-logo.png" });
+  const isSvg = logoPath.toLowerCase().endsWith(".svg");
+  const type = isSvg ? "image/svg+xml" : "image/png";
+  const name = isSvg ? "network-logo.svg" : "network-logo.png";
+  cachedLogoMxc = await intent.uploadContent(fs.readFileSync(logoPath), { type, name });
   return cachedLogoMxc;
 }
 
