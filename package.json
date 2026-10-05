@@ -8,13 +8,15 @@
     "dev": "node src/index.ts",
     "typecheck": "tsc",
     "test": "vitest run",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "node scripts/ensure-crypto-native.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@matrix-org/matrix-sdk-crypto-nodejs": "^0.6.6",
     "better-sqlite3": "12.11.1",
     "image-size": "2.0.2",
     "js-yaml": "5.2.1",
@@ -32,6 +34,7 @@
     "vitest": "4.1.9"
   },
   "allowScripts": {
-    "better-sqlite3@12.11.1": true
+    "better-sqlite3@12.11.1": true,
+    "@matrix-org/matrix-sdk-crypto-nodejs@0.6.6": true
   }
 }
