@@ -76,9 +76,12 @@ export async function tagPortalNetwork(
     channel: { id: channelId, displayname: channelName },
     "com.beeper.room_type.v2": threadType === "group" ? "group_dm" : "dm",
   };
+  const stateKeys = branding.stateKey ? [branding.stateKey, ""] : [""];
   for (const type of ["m.bridge", "uk.half-shot.bridge"]) {
-    await intent
-      .sendStateEvent(roomId, type, branding.stateKey, content)
-      .catch((err: Error) => console.warn(`${type} state failed for ${roomId}:`, err.message));
+    for (const key of stateKeys) {
+      await intent
+        .sendStateEvent(roomId, type, key, content)
+        .catch((err: Error) => console.warn(`${type} state (${key}) failed for ${roomId}:`, err.message));
+    }
   }
 }
